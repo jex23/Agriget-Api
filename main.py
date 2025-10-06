@@ -1594,12 +1594,12 @@ async def update_order(order_id: int, order_update: OrderUpdate, current_user_id
     
     **Requires Authentication**: Bearer token required in Authorization header
     
-    Users can update their own orders. Admins can update any order.
+    All authenticated users can update any order.
     
     - **quantity**: New quantity (optional)
     - **payment_terms**: Payment method (optional)
-    - **payment_status**: Payment status (optional, admin only)
-    - **order_status**: Order status (optional, admin only)
+    - **payment_status**: Payment status (optional)
+    - **order_status**: Order status (optional)
     - **shipping_address**: Shipping address (optional)
     """
     try:
@@ -1622,31 +1622,19 @@ async def update_order(order_id: int, order_update: OrderUpdate, current_user_id
         if not existing_order:
             raise HTTPException(status_code=404, detail="Order not found")
         
-        # Check if user owns the order or is admin
-        if not is_admin and existing_order['user_id'] != current_user_id:
-            raise HTTPException(status_code=403, detail="Access denied: You can only update your own orders")
+        # All authenticated users can update any order
         
         update_fields = []
         values = []
         update_data = order_update.model_dump(exclude_unset=True)
         
-        # Fields that regular users can update
-        user_fields = ['quantity', 'payment_terms', 'shipping_address']
-        # Fields only admins can update
-        admin_fields = ['payment_status', 'order_status']
+        # All fields that users can update
+        allowed_fields = ['quantity', 'payment_terms', 'shipping_address', 'payment_status', 'order_status']
         
-        for field in user_fields:
+        for field in allowed_fields:
             if field in update_data:
                 if field == 'payment_terms' and update_data[field] not in ['cash_on_delivery', 'over_the_counter']:
                     raise HTTPException(status_code=400, detail="Payment terms must be 'cash_on_delivery' or 'over_the_counter'")
-                
-                update_fields.append(f"{field} = %s")
-                values.append(update_data[field])
-        
-        for field in admin_fields:
-            if field in update_data:
-                if not is_admin:
-                    raise HTTPException(status_code=403, detail=f"Admin access required to update {field}")
                 
                 if field == 'payment_status' and update_data[field] not in ['pending', 'paid', 'failed']:
                     raise HTTPException(status_code=400, detail="Payment status must be 'pending', 'paid', or 'failed'")
