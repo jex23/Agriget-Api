@@ -133,6 +133,7 @@ class ProductCreate(BaseModel):
     unit: str = "cu.m"
     stock_quantity: float = 0
     price: float
+    minimum_order: float = 1.0
     is_active: bool = True
 
 class ProductUpdate(BaseModel):
@@ -142,6 +143,7 @@ class ProductUpdate(BaseModel):
     unit: Optional[str] = None
     stock_quantity: Optional[float] = None
     price: Optional[float] = None
+    minimum_order: Optional[float] = None
     is_active: Optional[bool] = None
 
 class ProductResponse(BaseModel):
@@ -152,6 +154,7 @@ class ProductResponse(BaseModel):
     unit: str
     stock_quantity: float
     price: float
+    minimum_order: float
     image_url: Optional[str]
     is_active: bool
     created_at: datetime
@@ -190,6 +193,8 @@ class OrderCreate(BaseModel):
     quantity: float = 1.0
     payment_terms: str  # 'cash_on_delivery' or 'over_the_counter'
     shipping_address: Optional[str] = None
+    shipping_fee: float = 0.0
+    free_shipping: bool = False
 
 class OrderUpdate(BaseModel):
     quantity: Optional[float] = None
@@ -197,6 +202,8 @@ class OrderUpdate(BaseModel):
     payment_status: Optional[str] = None
     order_status: Optional[str] = None
     shipping_address: Optional[str] = None
+    shipping_fee: Optional[float] = None
+    free_shipping: Optional[bool] = None
 
 class OrderResponse(BaseModel):
     id: int
@@ -209,6 +216,8 @@ class OrderResponse(BaseModel):
     payment_status: str
     order_status: str
     shipping_address: Optional[str]
+    shipping_fee: float
+    free_shipping: bool
     created_at: datetime
     updated_at: datetime
     # Optional product details
@@ -776,15 +785,16 @@ async def create_product(
     unit: str = Form("cu.m"),
     stock_quantity: float = Form(0),
     price: float = Form(...),
+    minimum_order: float = Form(1.0),
     is_active: bool = Form(True),
     image: UploadFile = File(None),
     current_user_id: int = Depends(get_current_user)
 ):
     """
     Create a new product with optional image upload
-    
+
     **Requires Authentication**: Bearer token required in Authorization header
-    
+
     Form data fields:
     - **name**: Product name (required)
     - **description**: Product description (optional)
@@ -792,9 +802,10 @@ async def create_product(
     - **unit**: Measurement unit (defaults to "cu.m")
     - **stock_quantity**: Available stock quantity (defaults to 0)
     - **price**: Product price (required)
+    - **minimum_order**: Minimum order quantity (defaults to 1.0)
     - **is_active**: Whether product is active (defaults to true)
     - **image**: Product image file (optional)
-    
+
     Returns the created product with generated ID and timestamps.
     """
     try:
@@ -819,11 +830,11 @@ async def create_product(
             print("DEBUG: No image to upload")
         
         insert_query = """
-        INSERT INTO products (name, description, category, unit, stock_quantity, price, image_url, is_active)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO products (name, description, category, unit, stock_quantity, price, minimum_order, image_url, is_active)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        
-        values = (name, description, category, unit, stock_quantity, price, image_url, is_active)
+
+        values = (name, description, category, unit, stock_quantity, price, minimum_order, image_url, is_active)
         cursor.execute(insert_query, values)
         connection.commit()
         
@@ -978,18 +989,19 @@ async def update_product(
     unit: str = Form(None),
     stock_quantity: float = Form(None),
     price: float = Form(None),
+    minimum_order: float = Form(None),
     is_active: bool = Form(None),
     image: UploadFile = File(None),
     current_user_id: int = Depends(get_current_user)
 ):
     """
     Update a product with optional image replacement
-    
+
     **Requires Authentication**: Bearer token required in Authorization header
-    
+
     Path parameters:
     - **product_id**: ID of the product to update
-    
+
     Form data fields (all optional):
     - **name**: Product name
     - **description**: Product description
@@ -997,9 +1009,10 @@ async def update_product(
     - **unit**: Measurement unit
     - **stock_quantity**: Available stock quantity
     - **price**: Product price
+    - **minimum_order**: Minimum order quantity
     - **is_active**: Whether product is active
     - **image**: New product image file (replaces existing image if provided)
-    
+
     Returns the updated product with modified timestamps.
     """
     try:
@@ -1037,6 +1050,9 @@ async def update_product(
         if price is not None:
             update_fields.append("price = %s")
             values.append(price)
+        if minimum_order is not None:
+            update_fields.append("minimum_order = %s")
+            values.append(minimum_order)
         if is_active is not None:
             update_fields.append("is_active = %s")
             values.append(is_active)
@@ -1364,14 +1380,16 @@ def generate_order_number():
 async def create_order(order: OrderCreate, current_user_id: int = Depends(get_current_user)):
     """
     Create a new order
-    
+
     **Requires Authentication**: Bearer token required in Authorization header
-    
+
     - **product_id**: ID of the product to order
     - **quantity**: Quantity to order (default: 1.0)
     - **payment_terms**: Payment method ('cash_on_delivery' or 'over_the_counter')
     - **shipping_address**: Optional shipping address
-    
+    - **shipping_fee**: Shipping fee amount (default: 0.0)
+    - **free_shipping**: Whether shipping is free (default: false)
+
     Returns the created order with generated order number and calculated total.
     """
     try:
@@ -1401,11 +1419,11 @@ async def create_order(order: OrderCreate, current_user_id: int = Depends(get_cu
         
         # Insert order
         insert_query = """
-        INSERT INTO orders (order_number, user_id, product_id, quantity, total_amount, 
-                           payment_terms, shipping_address)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO orders (order_number, user_id, product_id, quantity, total_amount,
+                           payment_terms, shipping_address, shipping_fee, free_shipping)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        
+
         values = (
             order_number,
             current_user_id,
@@ -1413,7 +1431,9 @@ async def create_order(order: OrderCreate, current_user_id: int = Depends(get_cu
             order.quantity,
             total_amount,
             order.payment_terms,
-            order.shipping_address
+            order.shipping_address,
+            order.shipping_fee,
+            order.free_shipping
         )
         
         cursor.execute(insert_query, values)
@@ -1591,16 +1611,18 @@ async def get_order(order_id: int, current_user_id: int = Depends(get_current_us
 async def update_order(order_id: int, order_update: OrderUpdate, current_user_id: int = Depends(get_current_user)):
     """
     Update an order
-    
+
     **Requires Authentication**: Bearer token required in Authorization header
-    
+
     All authenticated users can update any order.
-    
+
     - **quantity**: New quantity (optional)
     - **payment_terms**: Payment method (optional)
     - **payment_status**: Payment status (optional)
     - **order_status**: Order status (optional)
     - **shipping_address**: Shipping address (optional)
+    - **shipping_fee**: Shipping fee amount (optional)
+    - **free_shipping**: Whether shipping is free (optional)
     """
     try:
         connection = get_db_connection()
@@ -1629,8 +1651,8 @@ async def update_order(order_id: int, order_update: OrderUpdate, current_user_id
         update_data = order_update.model_dump(exclude_unset=True)
         
         # All fields that users can update
-        allowed_fields = ['quantity', 'payment_terms', 'shipping_address', 'payment_status', 'order_status']
-        
+        allowed_fields = ['quantity', 'payment_terms', 'shipping_address', 'payment_status', 'order_status', 'shipping_fee', 'free_shipping']
+
         for field in allowed_fields:
             if field in update_data:
                 if field == 'payment_terms' and update_data[field] not in ['cash_on_delivery', 'over_the_counter']:
