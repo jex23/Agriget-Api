@@ -18,6 +18,9 @@ import io
 import random
 import string
 import json
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 load_dotenv()
 
@@ -54,6 +57,14 @@ r2_access_key = os.getenv("r2_access_key")
 r2_secret_key = os.getenv("r2_secret_key")
 r2_endpoint = os.getenv("r2_endpoint")
 r2_bucket_name = os.getenv("r2_bucket_name")
+
+# Email configuration
+mail_host = os.getenv("MAIL_HOST")
+mail_port = int(os.getenv("MAIL_PORT", 465))
+mail_username = os.getenv("MAIL_USERNAME")
+mail_password = os.getenv("MAIL_PASSWORD")
+mail_from_address = os.getenv("MAIL_FROM_ADDRESS")
+mail_from_name = os.getenv("MAIL_FROM_NAME")
 
 # Debug R2 credentials at startup
 print("=== R2 CONFIGURATION DEBUG ===")
@@ -320,6 +331,84 @@ def delete_image_from_r2(filename: str):
         s3_client.delete_object(Bucket=r2_bucket_name, Key=filename)
     except Exception as e:
         print(f"Failed to delete image: {str(e)}")
+
+def send_order_email(recipient_email: str, recipient_name: str, order_number: str,
+                     order_status: str, product_name: str, quantity: float,
+                     total_amount: float, payment_status: str = "pending"):
+    """
+    Send order status email to customer
+    """
+    try:
+        # Create message
+        msg = MIMEMultipart('alternative')
+        msg['From'] = f"{mail_from_name} <{mail_from_address}>"
+        msg['To'] = recipient_email
+        msg['Subject'] = f"Order {order_status.replace('_', ' ').title()} - #{order_number}"
+
+        # Create HTML email body
+        html = f"""
+        <html>
+          <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+            <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 5px;">
+              <h2 style="color: #2c5f2d; border-bottom: 2px solid #2c5f2d; padding-bottom: 10px;">
+                Order {order_status.replace('_', ' ').title()}
+              </h2>
+
+              <p>Dear {recipient_name},</p>
+
+              <p>Your order status has been updated. Here are the details:</p>
+
+              <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+                <tr style="background-color: #f4f4f4;">
+                  <td style="padding: 10px; border: 1px solid #ddd;"><strong>Order Number:</strong></td>
+                  <td style="padding: 10px; border: 1px solid #ddd;">#{order_number}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px; border: 1px solid #ddd;"><strong>Product:</strong></td>
+                  <td style="padding: 10px; border: 1px solid #ddd;">{product_name}</td>
+                </tr>
+                <tr style="background-color: #f4f4f4;">
+                  <td style="padding: 10px; border: 1px solid #ddd;"><strong>Quantity:</strong></td>
+                  <td style="padding: 10px; border: 1px solid #ddd;">{quantity}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px; border: 1px solid #ddd;"><strong>Total Amount:</strong></td>
+                  <td style="padding: 10px; border: 1px solid #ddd;">PHP {total_amount:,.2f}</td>
+                </tr>
+                <tr style="background-color: #f4f4f4;">
+                  <td style="padding: 10px; border: 1px solid #ddd;"><strong>Payment Status:</strong></td>
+                  <td style="padding: 10px; border: 1px solid #ddd;">{payment_status.replace('_', ' ').title()}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px; border: 1px solid #ddd;"><strong>Order Status:</strong></td>
+                  <td style="padding: 10px; border: 1px solid #ddd;">{order_status.replace('_', ' ').title()}</td>
+                </tr>
+              </table>
+
+              <p>Thank you for your order!</p>
+
+              <p style="color: #666; font-size: 12px; margin-top: 30px; border-top: 1px solid #ddd; padding-top: 10px;">
+                This is an automated email from {mail_from_name}. Please do not reply to this email.
+              </p>
+            </div>
+          </body>
+        </html>
+        """
+
+        # Attach HTML content
+        msg.attach(MIMEText(html, 'html'))
+
+        # Connect to SMTP server and send email
+        with smtplib.SMTP_SSL(mail_host, mail_port) as server:
+            server.login(mail_username, mail_password)
+            server.send_message(msg)
+
+        print(f"Email sent successfully to {recipient_email}")
+        return True
+
+    except Exception as e:
+        print(f"Failed to send email: {str(e)}")
+        return False
 
 def create_access_token(data: dict):
     to_encode = data.copy()
@@ -1453,16 +1542,31 @@ async def create_order(order: OrderCreate, current_user_id: int = Depends(get_cu
             metadata={"order_number": order_number, "product_name": product['name'], "total_amount": total_amount}
         )
         
-        # Fetch the created order with product details
+        # Fetch the created order with product details and user email
         select_query = """
-        SELECT o.*, p.name as product_name, p.price as product_price, p.image_url as product_image
+        SELECT o.*, p.name as product_name, p.price as product_price, p.image_url as product_image,
+               u.email as user_email, u.first_name as user_first_name, u.last_name as user_last_name
         FROM orders o
         JOIN products p ON o.product_id = p.id
+        JOIN users u ON o.user_id = u.id
         WHERE o.id = %s
         """
         cursor.execute(select_query, (order_id,))
         created_order = cursor.fetchone()
-        
+
+        # Send email notification to customer
+        user_name = f"{created_order['user_first_name']} {created_order['user_last_name']}"
+        send_order_email(
+            recipient_email=created_order['user_email'],
+            recipient_name=user_name,
+            order_number=created_order['order_number'],
+            order_status=created_order['order_status'],
+            product_name=created_order['product_name'],
+            quantity=created_order['quantity'],
+            total_amount=created_order['total_amount'],
+            payment_status=created_order['payment_status']
+        )
+
         return OrderResponse(**created_order)
         
     except Error as e:
@@ -1714,9 +1818,9 @@ async def update_order(order_id: int, order_update: OrderUpdate, current_user_id
         
         # Return updated order with details
         select_query = """
-        SELECT o.*, 
+        SELECT o.*,
                p.name as product_name, p.price as product_price, p.image_url as product_image,
-               u.first_name as user_first_name, u.last_name as user_last_name, 
+               u.first_name as user_first_name, u.last_name as user_last_name,
                u.email as user_email, u.phone as user_phone
         FROM orders o
         JOIN products p ON o.product_id = p.id
@@ -1725,7 +1829,20 @@ async def update_order(order_id: int, order_update: OrderUpdate, current_user_id
         """
         cursor.execute(select_query, (order_id,))
         updated_order = cursor.fetchone()
-        
+
+        # Send email notification to customer about order update
+        user_name = f"{updated_order['user_first_name']} {updated_order['user_last_name']}"
+        send_order_email(
+            recipient_email=updated_order['user_email'],
+            recipient_name=user_name,
+            order_number=updated_order['order_number'],
+            order_status=updated_order['order_status'],
+            product_name=updated_order['product_name'],
+            quantity=updated_order['quantity'],
+            total_amount=updated_order['total_amount'],
+            payment_status=updated_order['payment_status']
+        )
+
         return OrderResponse(**updated_order)
         
     except Error as e:
