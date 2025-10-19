@@ -206,6 +206,7 @@ class OrderCreate(BaseModel):
     shipping_address: Optional[str] = None
     shipping_fee: float = 0.0
     free_shipping: bool = False
+    priority: Optional[str] = "medium"  # 'high', 'medium', 'low'
 
 class OrderUpdate(BaseModel):
     quantity: Optional[float] = None
@@ -215,6 +216,7 @@ class OrderUpdate(BaseModel):
     shipping_address: Optional[str] = None
     shipping_fee: Optional[float] = None
     free_shipping: Optional[bool] = None
+    priority: Optional[str] = None
 
 class OrderResponse(BaseModel):
     id: int
@@ -229,6 +231,7 @@ class OrderResponse(BaseModel):
     shipping_address: Optional[str]
     shipping_fee: float
     free_shipping: bool
+    priority: str
     created_at: datetime
     updated_at: datetime
     # Optional product details
@@ -1478,6 +1481,7 @@ async def create_order(order: OrderCreate, current_user_id: int = Depends(get_cu
     - **shipping_address**: Optional shipping address
     - **shipping_fee**: Shipping fee amount (default: 0.0)
     - **free_shipping**: Whether shipping is free (default: false)
+    - **priority**: Order priority ('high', 'medium', 'low', default: 'medium')
 
     Returns the created order with generated order number and calculated total.
     """
@@ -1491,7 +1495,11 @@ async def create_order(order: OrderCreate, current_user_id: int = Depends(get_cu
         # Validate payment terms
         if order.payment_terms not in ['cash_on_delivery', 'over_the_counter']:
             raise HTTPException(status_code=400, detail="Payment terms must be 'cash_on_delivery' or 'over_the_counter'")
-        
+
+        # Validate priority
+        if order.priority not in ['high', 'medium', 'low']:
+            raise HTTPException(status_code=400, detail="Priority must be 'high', 'medium', or 'low'")
+
         # Check if product exists and get price
         product_query = "SELECT id, price, name FROM products WHERE id = %s AND is_active = 1"
         cursor.execute(product_query, (order.product_id,))
@@ -1509,8 +1517,8 @@ async def create_order(order: OrderCreate, current_user_id: int = Depends(get_cu
         # Insert order
         insert_query = """
         INSERT INTO orders (order_number, user_id, product_id, quantity, total_amount,
-                           payment_terms, shipping_address, shipping_fee, free_shipping)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                           payment_terms, shipping_address, shipping_fee, free_shipping, priority)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
 
         values = (
@@ -1522,7 +1530,8 @@ async def create_order(order: OrderCreate, current_user_id: int = Depends(get_cu
             order.payment_terms,
             order.shipping_address,
             order.shipping_fee,
-            order.free_shipping
+            order.free_shipping,
+            order.priority
         )
         
         cursor.execute(insert_query, values)
@@ -1727,6 +1736,7 @@ async def update_order(order_id: int, order_update: OrderUpdate, current_user_id
     - **shipping_address**: Shipping address (optional)
     - **shipping_fee**: Shipping fee amount (optional)
     - **free_shipping**: Whether shipping is free (optional)
+    - **priority**: Order priority ('high', 'medium', 'low', optional)
     """
     try:
         connection = get_db_connection()
@@ -1755,19 +1765,22 @@ async def update_order(order_id: int, order_update: OrderUpdate, current_user_id
         update_data = order_update.model_dump(exclude_unset=True)
         
         # All fields that users can update
-        allowed_fields = ['quantity', 'payment_terms', 'shipping_address', 'payment_status', 'order_status', 'shipping_fee', 'free_shipping']
+        allowed_fields = ['quantity', 'payment_terms', 'shipping_address', 'payment_status', 'order_status', 'shipping_fee', 'free_shipping', 'priority']
 
         for field in allowed_fields:
             if field in update_data:
                 if field == 'payment_terms' and update_data[field] not in ['cash_on_delivery', 'over_the_counter']:
                     raise HTTPException(status_code=400, detail="Payment terms must be 'cash_on_delivery' or 'over_the_counter'")
-                
+
                 if field == 'payment_status' and update_data[field] not in ['pending', 'paid', 'failed']:
                     raise HTTPException(status_code=400, detail="Payment status must be 'pending', 'paid', or 'failed'")
-                
+
                 if field == 'order_status' and update_data[field] not in ['pending', 'processing', 'on_delivery', 'completed', 'canceled']:
                     raise HTTPException(status_code=400, detail="Order status must be 'pending', 'processing', 'on_delivery', 'completed', or 'canceled'")
-                
+
+                if field == 'priority' and update_data[field] not in ['high', 'medium', 'low']:
+                    raise HTTPException(status_code=400, detail="Priority must be 'high', 'medium', or 'low'")
+
                 update_fields.append(f"{field} = %s")
                 values.append(update_data[field])
         
