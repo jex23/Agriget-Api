@@ -1500,13 +1500,20 @@ async def create_order(order: OrderCreate, current_user_id: int = Depends(get_cu
         if order.priority not in ['high', 'medium', 'low']:
             raise HTTPException(status_code=400, detail="Priority must be 'high', 'medium', or 'low'")
 
-        # Check if product exists and get price
-        product_query = "SELECT id, price, name FROM products WHERE id = %s AND is_active = 1"
+        # Check if product exists and get price and stock
+        product_query = "SELECT id, price, name, stock_quantity FROM products WHERE id = %s AND is_active = 1"
         cursor.execute(product_query, (order.product_id,))
         product = cursor.fetchone()
-        
+
         if not product:
             raise HTTPException(status_code=404, detail="Product not found or inactive")
+
+        # Check if there's enough stock
+        if float(product['stock_quantity']) < order.quantity:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Insufficient stock. Available: {product['stock_quantity']}, Requested: {order.quantity}"
+            )
         
         # Calculate total amount
         total_amount = float(product['price']) * order.quantity
@@ -1536,8 +1543,17 @@ async def create_order(order: OrderCreate, current_user_id: int = Depends(get_cu
         
         cursor.execute(insert_query, values)
         connection.commit()
-        
+
         order_id = cursor.lastrowid
+
+        # Decrease stock quantity
+        update_stock_query = """
+        UPDATE products
+        SET stock_quantity = stock_quantity - %s
+        WHERE id = %s
+        """
+        cursor.execute(update_stock_query, (order.quantity, order.product_id))
+        connection.commit()
         
         # Create notification for new order
         create_notification(
@@ -1793,7 +1809,70 @@ async def update_order(order_id: int, order_update: OrderUpdate, current_user_id
                 new_total = float(product['price']) * update_data['quantity']
                 update_fields.append("total_amount = %s")
                 values.append(new_total)
-        
+
+        # Handle stock quantity changes based on order status and quantity changes
+        old_status = existing_order['order_status']
+        new_status = update_data.get('order_status', old_status)
+        old_quantity = float(existing_order['quantity'])
+        new_quantity = update_data.get('quantity', old_quantity)
+
+        # Case 1: Order is being canceled (return stock)
+        if old_status != 'canceled' and new_status == 'canceled':
+            # Return stock quantity to products
+            cursor.execute(
+                "UPDATE products SET stock_quantity = stock_quantity + %s WHERE id = %s",
+                (old_quantity, existing_order['product_id'])
+            )
+            connection.commit()
+
+        # Case 2: Order is being uncanceled (reduce stock)
+        elif old_status == 'canceled' and new_status != 'canceled':
+            # Check if there's enough stock
+            cursor.execute(
+                "SELECT stock_quantity FROM products WHERE id = %s",
+                (existing_order['product_id'],)
+            )
+            product_stock = cursor.fetchone()
+            if product_stock and float(product_stock['stock_quantity']) < new_quantity:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Insufficient stock. Available: {product_stock['stock_quantity']}, Requested: {new_quantity}"
+                )
+            # Decrease stock quantity
+            cursor.execute(
+                "UPDATE products SET stock_quantity = stock_quantity - %s WHERE id = %s",
+                (new_quantity, existing_order['product_id'])
+            )
+            connection.commit()
+
+        # Case 3: Quantity changed for non-canceled order
+        elif 'quantity' in update_data and old_status != 'canceled' and new_status != 'canceled':
+            quantity_diff = new_quantity - old_quantity
+            if quantity_diff > 0:
+                # Quantity increased - check stock and decrease
+                cursor.execute(
+                    "SELECT stock_quantity FROM products WHERE id = %s",
+                    (existing_order['product_id'],)
+                )
+                product_stock = cursor.fetchone()
+                if product_stock and float(product_stock['stock_quantity']) < quantity_diff:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Insufficient stock. Available: {product_stock['stock_quantity']}, Additional needed: {quantity_diff}"
+                    )
+                cursor.execute(
+                    "UPDATE products SET stock_quantity = stock_quantity - %s WHERE id = %s",
+                    (quantity_diff, existing_order['product_id'])
+                )
+                connection.commit()
+            elif quantity_diff < 0:
+                # Quantity decreased - return stock
+                cursor.execute(
+                    "UPDATE products SET stock_quantity = stock_quantity + %s WHERE id = %s",
+                    (abs(quantity_diff), existing_order['product_id'])
+                )
+                connection.commit()
+
         if not update_fields:
             raise HTTPException(status_code=400, detail="No valid fields to update")
         
