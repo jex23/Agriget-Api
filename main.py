@@ -207,6 +207,7 @@ class OrderCreate(BaseModel):
     shipping_fee: float = 0.0
     free_shipping: bool = False
     priority: Optional[str] = "medium"  # 'high', 'medium', 'low'
+    shipment_type: Optional[str] = "delivery"  # 'delivery' or 'pickup'
 
 class OrderUpdate(BaseModel):
     quantity: Optional[float] = None
@@ -217,6 +218,7 @@ class OrderUpdate(BaseModel):
     shipping_fee: Optional[float] = None
     free_shipping: Optional[bool] = None
     priority: Optional[str] = None
+    shipment_type: Optional[str] = None
 
 class OrderResponse(BaseModel):
     id: int
@@ -232,6 +234,7 @@ class OrderResponse(BaseModel):
     shipping_fee: float
     free_shipping: bool
     priority: str
+    shipment_type: str
     created_at: datetime
     updated_at: datetime
     # Optional product details
@@ -1482,6 +1485,7 @@ async def create_order(order: OrderCreate, current_user_id: int = Depends(get_cu
     - **shipping_fee**: Shipping fee amount (default: 0.0)
     - **free_shipping**: Whether shipping is free (default: false)
     - **priority**: Order priority ('high', 'medium', 'low', default: 'medium')
+    - **shipment_type**: Shipment type ('delivery' or 'pickup', default: 'delivery')
 
     Returns the created order with generated order number and calculated total.
     """
@@ -1489,9 +1493,9 @@ async def create_order(order: OrderCreate, current_user_id: int = Depends(get_cu
         connection = get_db_connection()
         if not connection:
             raise HTTPException(status_code=500, detail="Database connection failed")
-        
+
         cursor = connection.cursor(dictionary=True)
-        
+
         # Validate payment terms
         if order.payment_terms not in ['cash_on_delivery', 'over_the_counter']:
             raise HTTPException(status_code=400, detail="Payment terms must be 'cash_on_delivery' or 'over_the_counter'")
@@ -1499,6 +1503,10 @@ async def create_order(order: OrderCreate, current_user_id: int = Depends(get_cu
         # Validate priority
         if order.priority not in ['high', 'medium', 'low']:
             raise HTTPException(status_code=400, detail="Priority must be 'high', 'medium', or 'low'")
+
+        # Validate shipment type
+        if order.shipment_type not in ['delivery', 'pickup']:
+            raise HTTPException(status_code=400, detail="Shipment type must be 'delivery' or 'pickup'")
 
         # Check if product exists and get price and stock
         product_query = "SELECT id, price, name, stock_quantity FROM products WHERE id = %s AND is_active = 1"
@@ -1524,8 +1532,8 @@ async def create_order(order: OrderCreate, current_user_id: int = Depends(get_cu
         # Insert order
         insert_query = """
         INSERT INTO orders (order_number, user_id, product_id, quantity, total_amount,
-                           payment_terms, shipping_address, shipping_fee, free_shipping, priority)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                           payment_terms, shipping_address, shipping_fee, free_shipping, priority, shipment_type)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
 
         values = (
@@ -1538,7 +1546,8 @@ async def create_order(order: OrderCreate, current_user_id: int = Depends(get_cu
             order.shipping_address,
             order.shipping_fee,
             order.free_shipping,
-            order.priority
+            order.priority,
+            order.shipment_type
         )
         
         cursor.execute(insert_query, values)
@@ -1753,35 +1762,36 @@ async def update_order(order_id: int, order_update: OrderUpdate, current_user_id
     - **shipping_fee**: Shipping fee amount (optional)
     - **free_shipping**: Whether shipping is free (optional)
     - **priority**: Order priority ('high', 'medium', 'low', optional)
+    - **shipment_type**: Shipment type ('delivery' or 'pickup', optional)
     """
     try:
         connection = get_db_connection()
         if not connection:
             raise HTTPException(status_code=500, detail="Database connection failed")
-        
+
         cursor = connection.cursor(dictionary=True)
-        
+
         # Check if current user is admin
         cursor.execute("SELECT role FROM users WHERE id = %s", (current_user_id,))
         user = cursor.fetchone()
         is_admin = user and user['role'] == 'admin'
-        
+
         # Check if order exists and get current details
         check_query = "SELECT * FROM orders WHERE id = %s"
         cursor.execute(check_query, (order_id,))
         existing_order = cursor.fetchone()
-        
+
         if not existing_order:
             raise HTTPException(status_code=404, detail="Order not found")
-        
+
         # All authenticated users can update any order
-        
+
         update_fields = []
         values = []
         update_data = order_update.model_dump(exclude_unset=True)
-        
+
         # All fields that users can update
-        allowed_fields = ['quantity', 'payment_terms', 'shipping_address', 'payment_status', 'order_status', 'shipping_fee', 'free_shipping', 'priority']
+        allowed_fields = ['quantity', 'payment_terms', 'shipping_address', 'payment_status', 'order_status', 'shipping_fee', 'free_shipping', 'priority', 'shipment_type']
 
         for field in allowed_fields:
             if field in update_data:
@@ -1796,6 +1806,9 @@ async def update_order(order_id: int, order_update: OrderUpdate, current_user_id
 
                 if field == 'priority' and update_data[field] not in ['high', 'medium', 'low']:
                     raise HTTPException(status_code=400, detail="Priority must be 'high', 'medium', or 'low'")
+
+                if field == 'shipment_type' and update_data[field] not in ['delivery', 'pickup']:
+                    raise HTTPException(status_code=400, detail="Shipment type must be 'delivery' or 'pickup'")
 
                 update_fields.append(f"{field} = %s")
                 values.append(update_data[field])
