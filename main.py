@@ -280,6 +280,14 @@ class NotificationResponse(BaseModel):
     user_last_name: Optional[str] = None
     user_email: Optional[str] = None
 
+class OrderProofResponse(BaseModel):
+    id: int
+    order_id: int
+    image_path: str
+    remarks: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
 def hash_password(password: str) -> str:
     salt = bcrypt.gensalt()
     return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
@@ -337,6 +345,48 @@ def delete_image_from_r2(filename: str):
         s3_client.delete_object(Bucket=r2_bucket_name, Key=filename)
     except Exception as e:
         print(f"Failed to delete image: {str(e)}")
+
+async def upload_order_proof_to_r2(file: UploadFile) -> str:
+    """
+    Upload order proof image to Cloudflare R2 and return the path
+    """
+    try:
+        print(f"DEBUG: Starting upload for order proof file: {file.filename}")
+
+        # Validate file exists and has content
+        if not file or not file.filename:
+            raise HTTPException(status_code=400, detail="No file provided")
+
+        file_extension = file.filename.split('.')[-1] if '.' in file.filename else 'jpg'
+        unique_filename = f"order_proofs/{uuid.uuid4()}.{file_extension}"
+        print(f"DEBUG: Generated unique filename: {unique_filename}")
+
+        file_content = await file.read()
+        print(f"DEBUG: File content length: {len(file_content) if file_content else 0}")
+
+        # Check if file content is empty
+        if not file_content:
+            raise HTTPException(status_code=400, detail="Empty file provided")
+
+        print(f"DEBUG: R2 config - bucket: {r2_bucket_name}, endpoint: {r2_endpoint}")
+        print(f"DEBUG: Content type: {file.content_type}")
+
+        s3_client.put_object(
+            Bucket=r2_bucket_name,
+            Key=unique_filename,
+            Body=file_content,
+            ContentType=file.content_type or 'application/octet-stream'
+        )
+
+        # Store only the filename, not the full URL
+        image_path = unique_filename
+        print(f"DEBUG: Upload successful, path: {image_path}")
+        return image_path
+
+    except Exception as e:
+        print(f"DEBUG: Upload failed with error: {e}")
+        print(f"DEBUG: Error type: {type(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload image: {str(e)}")
 
 def send_order_email(recipient_email: str, recipient_name: str, order_number: str,
                      order_status: str, product_name: str, quantity: float,
@@ -1790,6 +1840,9 @@ async def update_order(order_id: int, order_update: OrderUpdate, current_user_id
         values = []
         update_data = order_update.model_dump(exclude_unset=True)
 
+        print(f"DEBUG UPDATE ORDER: Order ID: {order_id}")
+        print(f"DEBUG UPDATE ORDER: Incoming update_data: {update_data}")
+
         # All fields that users can update
         allowed_fields = ['quantity', 'payment_terms', 'shipping_address', 'payment_status', 'order_status', 'shipping_fee', 'free_shipping', 'priority', 'shipment_type']
 
@@ -1812,6 +1865,7 @@ async def update_order(order_id: int, order_update: OrderUpdate, current_user_id
 
                 update_fields.append(f"{field} = %s")
                 values.append(update_data[field])
+                print(f"DEBUG UPDATE ORDER: Added field '{field}' with value '{update_data[field]}'")
         
         # Recalculate total if quantity changed
         if 'quantity' in update_data:
@@ -1888,12 +1942,18 @@ async def update_order(order_id: int, order_update: OrderUpdate, current_user_id
 
         if not update_fields:
             raise HTTPException(status_code=400, detail="No valid fields to update")
-        
+
         values.append(order_id)
         update_query = f"UPDATE orders SET {', '.join(update_fields)} WHERE id = %s"
-        
+
+        print(f"DEBUG UPDATE ORDER: Final update_fields: {update_fields}")
+        print(f"DEBUG UPDATE ORDER: Final values: {values}")
+        print(f"DEBUG UPDATE ORDER: Final SQL query: {update_query}")
+
         cursor.execute(update_query, values)
         connection.commit()
+
+        print(f"DEBUG UPDATE ORDER: Update committed successfully")
         
         # Create notification for order update
         if 'payment_status' in update_data and update_data['payment_status'] == 'paid':
@@ -1934,6 +1994,11 @@ async def update_order(order_id: int, order_update: OrderUpdate, current_user_id
         """
         cursor.execute(select_query, (order_id,))
         updated_order = cursor.fetchone()
+
+        print(f"DEBUG UPDATE ORDER: Fetched updated order from DB:")
+        print(f"  - order_status: {updated_order.get('order_status')}")
+        print(f"  - payment_status: {updated_order.get('payment_status')}")
+        print(f"  - shipment_type: {updated_order.get('shipment_type')}")
 
         # Send email notification to customer about order update
         user_name = f"{updated_order['user_first_name']} {updated_order['user_last_name']}"
@@ -2314,30 +2379,251 @@ async def create_notification_endpoint(
 async def get_unread_notifications_count(current_user_id: int = Depends(get_current_user)):
     """
     Get count of unread notifications (admin only)
-    
+
     **Requires Authentication**: Bearer token required in Authorization header
     **Requires Admin Role**: Only admin users can access this endpoint
-    
+
     Returns the number of unread notifications for dashboard badges.
     """
     try:
         connection = get_db_connection()
         if not connection:
             raise HTTPException(status_code=500, detail="Database connection failed")
-        
+
         cursor = connection.cursor()
-        
+
         # Check if current user is admin
         cursor.execute("SELECT role FROM users WHERE id = %s", (current_user_id,))
         user = cursor.fetchone()
         if not user or user[0] != 'admin':
             raise HTTPException(status_code=403, detail="Admin access required")
-        
+
         cursor.execute("SELECT COUNT(*) FROM notifications WHERE status = 'unread'")
         count = cursor.fetchone()[0]
-        
+
         return {"unread_count": count}
-        
+
+    except Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        if connection and connection.is_connected():
+            cursor.close()
+            connection.close()
+
+@app.post("/order-proofs", response_model=OrderProofResponse, status_code=201)
+async def create_order_proof(
+    order_id: int = Form(...),
+    remarks: str = Form(None),
+    image: UploadFile = File(...),
+    current_user_id: int = Depends(get_current_user)
+):
+    """
+    Create a new order proof with image upload
+
+    **Requires Authentication**: Bearer token required in Authorization header
+
+    Form data fields:
+    - **order_id**: ID of the order this proof belongs to (required)
+    - **remarks**: Optional remarks or notes about the proof (optional)
+    - **image**: Proof image file (required)
+
+    Returns the created order proof with generated ID and timestamps.
+    The image is uploaded to R2 storage and only the path is stored in the database.
+    """
+    try:
+        connection = get_db_connection()
+        if not connection:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+
+        cursor = connection.cursor(dictionary=True)
+
+        # Check if order exists
+        order_check = "SELECT id FROM orders WHERE id = %s"
+        cursor.execute(order_check, (order_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        # Upload image to R2
+        image_path = await upload_order_proof_to_r2(image)
+
+        # Insert order proof
+        insert_query = """
+        INSERT INTO order_proofs (order_id, image_path, remarks)
+        VALUES (%s, %s, %s)
+        """
+
+        cursor.execute(insert_query, (order_id, image_path, remarks))
+        connection.commit()
+
+        proof_id = cursor.lastrowid
+
+        # Fetch the created proof
+        select_query = "SELECT * FROM order_proofs WHERE id = %s"
+        cursor.execute(select_query, (proof_id,))
+        proof = cursor.fetchone()
+
+        return OrderProofResponse(**proof)
+
+    except Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        if connection and connection.is_connected():
+            cursor.close()
+            connection.close()
+
+@app.put("/order-proofs/{proof_id}", response_model=OrderProofResponse)
+async def update_order_proof(
+    proof_id: int,
+    remarks: str = Form(None),
+    image: UploadFile = File(None),
+    current_user_id: int = Depends(get_current_user)
+):
+    """
+    Update an order proof
+
+    **Requires Authentication**: Bearer token required in Authorization header
+
+    Path parameters:
+    - **proof_id**: ID of the order proof to update
+
+    Form data fields (all optional):
+    - **remarks**: Update remarks or notes
+    - **image**: New proof image file (replaces existing image if provided)
+
+    Returns the updated order proof with modified timestamps.
+    If a new image is provided, the old image is deleted from R2 storage.
+    """
+    try:
+        connection = get_db_connection()
+        if not connection:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+
+        cursor = connection.cursor(dictionary=True)
+
+        # Check if proof exists
+        check_query = "SELECT * FROM order_proofs WHERE id = %s"
+        cursor.execute(check_query, (proof_id,))
+        existing_proof = cursor.fetchone()
+
+        if not existing_proof:
+            raise HTTPException(status_code=404, detail="Order proof not found")
+
+        update_fields = []
+        values = []
+
+        if remarks is not None:
+            update_fields.append("remarks = %s")
+            values.append(remarks)
+
+        # Handle image replacement
+        if image and hasattr(image, 'filename') and image.filename and image.filename.strip():
+            # Delete old image from R2
+            if existing_proof['image_path']:
+                delete_image_from_r2(existing_proof['image_path'])
+
+            # Upload new image
+            new_image_path = await upload_order_proof_to_r2(image)
+            update_fields.append("image_path = %s")
+            values.append(new_image_path)
+
+        if not update_fields:
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        update_fields.append("updated_at = CURRENT_TIMESTAMP")
+        values.append(proof_id)
+
+        update_query = f"UPDATE order_proofs SET {', '.join(update_fields)} WHERE id = %s"
+        cursor.execute(update_query, values)
+        connection.commit()
+
+        # Fetch updated proof
+        select_query = "SELECT * FROM order_proofs WHERE id = %s"
+        cursor.execute(select_query, (proof_id,))
+        updated_proof = cursor.fetchone()
+
+        return OrderProofResponse(**updated_proof)
+
+    except Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        if connection and connection.is_connected():
+            cursor.close()
+            connection.close()
+
+@app.get("/order-proofs/{order_id}", response_model=List[OrderProofResponse])
+async def get_order_proofs(order_id: int, current_user_id: int = Depends(get_current_user)):
+    """
+    Get all proofs for a specific order
+
+    **Requires Authentication**: Bearer token required in Authorization header
+
+    Path parameters:
+    - **order_id**: ID of the order to get proofs for
+
+    Returns a list of all order proofs for the specified order.
+    Images can be retrieved using the /images/{image_path} endpoint.
+    """
+    try:
+        connection = get_db_connection()
+        if not connection:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+
+        cursor = connection.cursor(dictionary=True)
+
+        # Check if order exists
+        order_check = "SELECT id FROM orders WHERE id = %s"
+        cursor.execute(order_check, (order_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        # Get all proofs for the order
+        query = """
+        SELECT * FROM order_proofs
+        WHERE order_id = %s
+        ORDER BY created_at DESC
+        """
+
+        cursor.execute(query, (order_id,))
+        proofs = cursor.fetchall()
+
+        return [OrderProofResponse(**proof) for proof in proofs]
+
+    except Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        if connection and connection.is_connected():
+            cursor.close()
+            connection.close()
+
+@app.get("/order-proofs/proof/{proof_id}", response_model=OrderProofResponse)
+async def get_order_proof_by_id(proof_id: int, current_user_id: int = Depends(get_current_user)):
+    """
+    Get a specific order proof by ID
+
+    **Requires Authentication**: Bearer token required in Authorization header
+
+    Path parameters:
+    - **proof_id**: ID of the order proof to retrieve
+
+    Returns the order proof details.
+    The image can be retrieved using the /images/{image_path} endpoint.
+    """
+    try:
+        connection = get_db_connection()
+        if not connection:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+
+        cursor = connection.cursor(dictionary=True)
+
+        query = "SELECT * FROM order_proofs WHERE id = %s"
+        cursor.execute(query, (proof_id,))
+        proof = cursor.fetchone()
+
+        if not proof:
+            raise HTTPException(status_code=404, detail="Order proof not found")
+
+        return OrderProofResponse(**proof)
+
     except Error as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
     finally:
@@ -2347,4 +2633,4 @@ async def get_unread_notifications_count(current_user_id: int = Depends(get_curr
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=5096)

@@ -1,0 +1,20 @@
+INFO:     Will watch for changes in these directories: ['/Users/jamesgalos/Documents/Agrivet/agrivet-api']
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [7408] using StatReload
+INFO:     Started server process [7418]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  StatReload detected changes in 'main.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [7418]
+=== R2 CONFIGURATION DEBUG ===
+r2_access_key: ✓ Set
+r2_secret_key: ✓ Set
+r2_endpoint: https://101c0dbcb33f2b302a0c46862e4e3188.r2.cloudflarestorage.com
+r2_bucket_name: aggregates-bucket
+==============================
+INFO:     Started server process [14258]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
