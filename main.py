@@ -47,24 +47,24 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 99999999
 
 security = HTTPBearer()
 
-db_user = os.getenv("DB_USER")
-db_password = os.getenv("DB_PASSWORD")
-db_host = os.getenv("DB_HOST")
-db_port = os.getenv("DB_PORT")
-db_name = os.getenv("DB_NAME")
+db_user = os.getenv("DB_USER", "james23")
+db_password = os.getenv("DB_PASSWORD", "J@mes2410117")
+db_host = os.getenv("DB_HOST", "179.61.246.136")
+db_port = os.getenv("DB_PORT", "3306")
+db_name = os.getenv("DB_NAME", "jat")
 
-r2_access_key = os.getenv("r2_access_key")
-r2_secret_key = os.getenv("r2_secret_key")
-r2_endpoint = os.getenv("r2_endpoint")
-r2_bucket_name = os.getenv("r2_bucket_name")
+r2_access_key = os.getenv("r2_access_key", "ffa0afd11d57217d95f42ac7775c4e35")
+r2_secret_key = os.getenv("r2_secret_key", "da8abd0f0536240b7d928e5d550a2824a3649668b399f4154468a45d931a0e22")
+r2_endpoint = os.getenv("r2_endpoint", "https://101c0dbcb33f2b302a0c46862e4e3188.r2.cloudflarestorage.com")
+r2_bucket_name = os.getenv("r2_bucket_name", "aggregates-bucket")
 
 # Email configuration
-mail_host = os.getenv("MAIL_HOST")
-mail_port = int(os.getenv("MAIL_PORT", 465))
-mail_username = os.getenv("MAIL_USERNAME")
-mail_password = os.getenv("MAIL_PASSWORD")
-mail_from_address = os.getenv("MAIL_FROM_ADDRESS")
-mail_from_name = os.getenv("MAIL_FROM_NAME")
+mail_host = os.getenv("MAIL_HOST", "smtp.gmail.com")
+mail_port = int(os.getenv("MAIL_PORT", "465"))
+mail_username = os.getenv("MAIL_USERNAME", "joeysaggregate@gmail.com")
+mail_password = os.getenv("MAIL_PASSWORD", "fmjlzawkimkoypdm")
+mail_from_address = os.getenv("MAIL_FROM_ADDRESS", "joeysaggregate@gmail.com")
+mail_from_name = os.getenv("MAIL_FROM_NAME", "Joey's Aggregates Support")
 
 # Debug R2 credentials at startup
 print("=== R2 CONFIGURATION DEBUG ===")
@@ -464,6 +464,94 @@ def send_order_email(recipient_email: str, recipient_name: str, order_number: st
 
     except Exception as e:
         print(f"Failed to send email: {str(e)}")
+        return False
+
+def send_admin_order_notification(order_number: str, customer_name: str, customer_email: str,
+                                   product_name: str, quantity: float, total_amount: float,
+                                   payment_terms: str, shipping_address: str = None):
+    """
+    Send new order notification to admin/business owner
+    """
+    try:
+        # Create message
+        msg = MIMEMultipart('alternative')
+        msg['From'] = f"{mail_from_name} <{mail_from_address}>"
+        msg['To'] = mail_from_address  # Send to business owner
+        msg['Subject'] = f"New Order Received - #{order_number}"
+
+        # Create HTML email body for admin
+        html = f"""
+        <html>
+          <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+            <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 5px;">
+              <h2 style="color: #2c5f2d; border-bottom: 2px solid #2c5f2d; padding-bottom: 10px;">
+                🔔 New Order Received
+              </h2>
+
+              <p>A new order has been placed on your platform.</p>
+
+              <h3 style="color: #2c5f2d; margin-top: 20px;">Order Details:</h3>
+              <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+                <tr style="background-color: #f4f4f4;">
+                  <td style="padding: 10px; border: 1px solid #ddd;"><strong>Order Number:</strong></td>
+                  <td style="padding: 10px; border: 1px solid #ddd;">#{order_number}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px; border: 1px solid #ddd;"><strong>Product:</strong></td>
+                  <td style="padding: 10px; border: 1px solid #ddd;">{product_name}</td>
+                </tr>
+                <tr style="background-color: #f4f4f4;">
+                  <td style="padding: 10px; border: 1px solid #ddd;"><strong>Quantity:</strong></td>
+                  <td style="padding: 10px; border: 1px solid #ddd;">{quantity}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px; border: 1px solid #ddd;"><strong>Total Amount:</strong></td>
+                  <td style="padding: 10px; border: 1px solid #ddd;">PHP {total_amount:,.2f}</td>
+                </tr>
+                <tr style="background-color: #f4f4f4;">
+                  <td style="padding: 10px; border: 1px solid #ddd;"><strong>Payment Terms:</strong></td>
+                  <td style="padding: 10px; border: 1px solid #ddd;">{payment_terms.replace('_', ' ').title()}</td>
+                </tr>
+                {f'<tr><td style="padding: 10px; border: 1px solid #ddd;"><strong>Shipping Address:</strong></td><td style="padding: 10px; border: 1px solid #ddd;">{shipping_address}</td></tr>' if shipping_address else ''}
+              </table>
+
+              <h3 style="color: #2c5f2d; margin-top: 20px;">Customer Information:</h3>
+              <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+                <tr style="background-color: #f4f4f4;">
+                  <td style="padding: 10px; border: 1px solid #ddd;"><strong>Name:</strong></td>
+                  <td style="padding: 10px; border: 1px solid #ddd;">{customer_name}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px; border: 1px solid #ddd;"><strong>Email:</strong></td>
+                  <td style="padding: 10px; border: 1px solid #ddd;">{customer_email}</td>
+                </tr>
+              </table>
+
+              <p style="margin-top: 30px; padding: 15px; background-color: #fff3cd; border-left: 4px solid #ffc107; border-radius: 3px;">
+                <strong>Action Required:</strong> Please process this order as soon as possible.
+              </p>
+
+              <p style="color: #666; font-size: 12px; margin-top: 30px; border-top: 1px solid #ddd; padding-top: 10px;">
+                This is an automated notification from {mail_from_name} order management system.
+              </p>
+            </div>
+          </body>
+        </html>
+        """
+
+        # Attach HTML content
+        msg.attach(MIMEText(html, 'html'))
+
+        # Connect to SMTP server and send email
+        with smtplib.SMTP_SSL(mail_host, mail_port) as server:
+            server.login(mail_username, mail_password)
+            server.send_message(msg)
+
+        print(f"Admin notification email sent successfully for order #{order_number}")
+        return True
+
+    except Exception as e:
+        print(f"Failed to send admin notification email: {str(e)}")
         return False
 
 def create_access_token(data: dict):
@@ -1649,6 +1737,18 @@ async def create_order(order: OrderCreate, current_user_id: int = Depends(get_cu
             quantity=created_order['quantity'],
             total_amount=created_order['total_amount'],
             payment_status=created_order['payment_status']
+        )
+
+        # Send email notification to admin/business owner
+        send_admin_order_notification(
+            order_number=created_order['order_number'],
+            customer_name=user_name,
+            customer_email=created_order['user_email'],
+            product_name=created_order['product_name'],
+            quantity=created_order['quantity'],
+            total_amount=created_order['total_amount'],
+            payment_terms=created_order['payment_terms'],
+            shipping_address=created_order.get('shipping_address')
         )
 
         return OrderResponse(**created_order)
