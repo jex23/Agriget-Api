@@ -473,6 +473,9 @@ def send_admin_order_notification(order_number: str, customer_name: str, custome
     Send new order notification to admin/business owner
     """
     try:
+        # Format payment terms display name
+        payment_terms_display = "Pay Upon Pickup" if payment_terms == "over_the_counter" else payment_terms.replace('_', ' ').title()
+
         # Create message
         msg = MIMEMultipart('alternative')
         msg['From'] = f"{mail_from_name} <{mail_from_address}>"
@@ -510,7 +513,7 @@ def send_admin_order_notification(order_number: str, customer_name: str, custome
                 </tr>
                 <tr style="background-color: #f4f4f4;">
                   <td style="padding: 10px; border: 1px solid #ddd;"><strong>Payment Terms:</strong></td>
-                  <td style="padding: 10px; border: 1px solid #ddd;">{payment_terms.replace('_', ' ').title()}</td>
+                  <td style="padding: 10px; border: 1px solid #ddd;">{payment_terms_display}</td>
                 </tr>
                 {f'<tr><td style="padding: 10px; border: 1px solid #ddd;"><strong>Shipping Address:</strong></td><td style="padding: 10px; border: 1px solid #ddd;">{shipping_address}</td></tr>' if shipping_address else ''}
               </table>
