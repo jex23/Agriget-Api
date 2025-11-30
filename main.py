@@ -94,6 +94,7 @@ class UserRegister(BaseModel):
     date_of_birth: Optional[date] = None
     role: Optional[str] = "user"
     status: Optional[str] = "active"
+    archive: Optional[int] = 0
 
 class UserLogin(BaseModel):
     username: str
@@ -111,6 +112,7 @@ class UserUpdate(BaseModel):
     role: Optional[str] = None
     password: Optional[str] = None
     status: Optional[str] = None
+    archive: Optional[int] = None
 
 class UserResponse(BaseModel):
     id: int
@@ -127,6 +129,7 @@ class UserResponse(BaseModel):
     updated_at: datetime
     last_logon: Optional[datetime]
     status: str
+    archive: int
 
 class LoginResponse(BaseModel):
     message: str
@@ -287,6 +290,34 @@ class OrderProofResponse(BaseModel):
     remarks: Optional[str]
     created_at: datetime
     updated_at: datetime
+
+class ProductSalesAnalytics(BaseModel):
+    product_id: int
+    product_name: str
+    category: Optional[str]
+    total_quantity_sold: float
+    total_revenue: float
+    order_count: int
+
+class OrderStatusBreakdown(BaseModel):
+    status: str
+    count: int
+    total_revenue: float
+
+class PaymentStatusBreakdown(BaseModel):
+    status: str
+    count: int
+    total_revenue: float
+
+class SalesAnalyticsResponse(BaseModel):
+    total_revenue: float
+    total_orders: int
+    total_products_sold: float
+    products_sales: List[ProductSalesAnalytics]
+    order_status_breakdown: List[OrderStatusBreakdown]
+    payment_status_breakdown: List[PaymentStatusBreakdown]
+    date_range_start: Optional[datetime] = None
+    date_range_end: Optional[datetime] = None
 
 def hash_password(password: str) -> str:
     salt = bcrypt.gensalt()
@@ -613,6 +644,7 @@ async def register(user: UserRegister):
     - **date_of_birth**: Optional date of birth
     - **role**: User role (defaults to 'user')
     - **status**: Account status (defaults to 'active')
+    - **archive**: Archive status (defaults to 0)
     """
     try:
         hashed_password = hash_password(user.password)
@@ -629,11 +661,11 @@ async def register(user: UserRegister):
             raise HTTPException(status_code=409, detail="Username or email already exists")
         
         insert_query = """
-        INSERT INTO users (first_name, last_name, username, phone, address, date_of_birth, 
-                          gender, email, role, password, status)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO users (first_name, last_name, username, phone, address, date_of_birth,
+                          gender, email, role, password, status, archive)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        
+
         values = (
             user.first_name,
             user.last_name,
@@ -645,7 +677,8 @@ async def register(user: UserRegister):
             user.email,
             user.role,
             hashed_password,
-            user.status
+            user.status,
+            user.archive
         )
         
         cursor.execute(insert_query, values)
@@ -724,7 +757,8 @@ async def login(user_credentials: UserLogin):
             created_at=user['created_at'],
             updated_at=user['updated_at'],
             last_logon=user['last_logon'],
-            status=user['status']
+            status=user['status'],
+            archive=user['archive']
         )
         
         return LoginResponse(
@@ -733,6 +767,59 @@ async def login(user_credentials: UserLogin):
             user=user_data
         )
         
+    except Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        if connection and connection.is_connected():
+            cursor.close()
+            connection.close()
+
+@app.get("/user", response_model=UserResponse)
+async def get_user_profile(current_user_id: int = Depends(get_current_user)):
+    """
+    Get current user's profile
+
+    Returns the authenticated user's complete profile information including:
+    - Personal details (first_name, last_name, phone, address, date_of_birth, gender)
+    - Account information (username, email, role, status)
+    - Timestamps (created_at, updated_at, last_logon)
+
+    Requires valid authentication token.
+    """
+    try:
+        connection = get_db_connection()
+        if not connection:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+
+        cursor = connection.cursor(dictionary=True)
+
+        query = "SELECT * FROM users WHERE id = %s"
+        cursor.execute(query, (current_user_id,))
+        user = cursor.fetchone()
+
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        user_data = UserResponse(
+            id=user['id'],
+            first_name=user['first_name'],
+            last_name=user['last_name'],
+            username=user['username'],
+            phone=user['phone'],
+            address=user['address'],
+            date_of_birth=user['date_of_birth'],
+            gender=user['gender'],
+            email=user['email'],
+            role=user['role'],
+            created_at=user['created_at'],
+            updated_at=user['updated_at'],
+            last_logon=user['last_logon'],
+            status=user['status'],
+            archive=user['archive']
+        )
+
+        return user_data
+
     except Error as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
     finally:
@@ -754,6 +841,7 @@ async def edit_user(user_update: UserUpdate, current_user_id: int = Depends(get_
     - username (must be unique)
     - role (must be 'admin' or 'user')
     - status (must be 'active' or 'disable')
+    - archive (must be 0 or 1)
     
     Validation rules:
     - email and username must be unique
@@ -789,7 +877,7 @@ async def edit_user(user_update: UserUpdate, current_user_id: int = Depends(get_
         allowed_fields = ['first_name', 'last_name', 'phone', 'address', 'date_of_birth', 'gender', 'email']
         
         # Sensitive fields that only admins can update
-        admin_only_fields = ['username', 'role', 'status']
+        admin_only_fields = ['username', 'role', 'status', 'archive']
         
         for field in allowed_fields:
             if field in update_data:
@@ -825,7 +913,10 @@ async def edit_user(user_update: UserUpdate, current_user_id: int = Depends(get_
                 
                 if field == 'status' and update_data[field] not in ['active', 'disable']:
                     raise HTTPException(status_code=400, detail="Status must be 'active' or 'disable'")
-                
+
+                if field == 'archive' and update_data[field] not in [0, 1]:
+                    raise HTTPException(status_code=400, detail="Archive must be 0 or 1")
+
                 update_fields.append(f"{field} = %s")
                 values.append(update_data[field])
         
@@ -897,7 +988,7 @@ async def get_users(current_user_id: int = Depends(get_current_user)):
     
     Returns a list of all users with complete profile information:
     - id, first_name, last_name, username, phone, address, date_of_birth
-    - gender, email, role, created_at, updated_at, last_logon, status
+    - gender, email, role, created_at, updated_at, last_logon, status, archive
     
     Note: Password field is excluded for security reasons.
     """
@@ -913,8 +1004,8 @@ async def get_users(current_user_id: int = Depends(get_current_user)):
             raise HTTPException(status_code=403, detail="Admin access required")
         # Get all users (excluding password for security)
         cursor.execute("""
-            SELECT id, first_name, last_name, username, phone, address, date_of_birth, 
-                   gender, email, role, created_at, updated_at, last_logon, status 
+            SELECT id, first_name, last_name, username, phone, address, date_of_birth,
+                   gender, email, role, created_at, updated_at, last_logon, status, archive
             FROM users
         """)
         users = cursor.fetchall()
@@ -2726,6 +2817,135 @@ async def get_order_proof_by_id(proof_id: int, current_user_id: int = Depends(ge
             raise HTTPException(status_code=404, detail="Order proof not found")
 
         return OrderProofResponse(**proof)
+
+    except Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        if connection and connection.is_connected():
+            cursor.close()
+            connection.close()
+
+@app.get("/analytics/sales", response_model=SalesAnalyticsResponse)
+async def get_sales_analytics(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    current_user_id: int = Depends(get_current_user)
+):
+    """
+    Get comprehensive sales analytics for orders and products
+
+    **Requires Authentication**: Bearer token required in Authorization header
+    **Requires Admin Role**: Only admin users can access this endpoint
+
+    Query parameters:
+    - **start_date**: Optional filter - start date in YYYY-MM-DD format
+    - **end_date**: Optional filter - end date in YYYY-MM-DD format
+
+    Returns comprehensive analytics including:
+    - Total revenue and orders
+    - Sales breakdown by product
+    - Order status breakdown
+    - Payment status breakdown
+    """
+    try:
+        connection = get_db_connection()
+        if not connection:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+
+        cursor = connection.cursor(dictionary=True)
+
+        # Check if current user is admin
+        cursor.execute("SELECT role FROM users WHERE id = %s", (current_user_id,))
+        user = cursor.fetchone()
+        if not user or user['role'] != 'admin':
+            raise HTTPException(status_code=403, detail="Admin access required")
+
+        # Build date filter
+        date_filter = ""
+        date_params = []
+        if start_date:
+            date_filter += " AND o.created_at >= %s"
+            date_params.append(start_date)
+        if end_date:
+            date_filter += " AND o.created_at <= %s"
+            date_params.append(end_date + " 23:59:59")
+
+        # Get total revenue and orders
+        total_query = f"""
+        SELECT
+            COALESCE(SUM(total_amount), 0) as total_revenue,
+            COUNT(*) as total_orders,
+            COALESCE(SUM(quantity), 0) as total_products_sold
+        FROM orders o
+        WHERE 1=1 {date_filter}
+        """
+        cursor.execute(total_query, tuple(date_params))
+        totals = cursor.fetchone()
+
+        # Get product sales breakdown
+        product_query = f"""
+        SELECT
+            p.id as product_id,
+            p.name as product_name,
+            p.category,
+            COALESCE(SUM(o.quantity), 0) as total_quantity_sold,
+            COALESCE(SUM(o.total_amount), 0) as total_revenue,
+            COUNT(o.id) as order_count
+        FROM products p
+        LEFT JOIN orders o ON p.id = o.product_id {date_filter.replace('WHERE 1=1', '')}
+        GROUP BY p.id, p.name, p.category
+        HAVING order_count > 0
+        ORDER BY total_revenue DESC
+        """
+        cursor.execute(product_query, tuple(date_params))
+        products_sales = cursor.fetchall()
+
+        # Get order status breakdown
+        status_query = f"""
+        SELECT
+            order_status as status,
+            COUNT(*) as count,
+            COALESCE(SUM(total_amount), 0) as total_revenue
+        FROM orders o
+        WHERE 1=1 {date_filter}
+        GROUP BY order_status
+        ORDER BY count DESC
+        """
+        cursor.execute(status_query, tuple(date_params))
+        order_status_breakdown = cursor.fetchall()
+
+        # Get payment status breakdown
+        payment_query = f"""
+        SELECT
+            payment_status as status,
+            COUNT(*) as count,
+            COALESCE(SUM(total_amount), 0) as total_revenue
+        FROM orders o
+        WHERE 1=1 {date_filter}
+        GROUP BY payment_status
+        ORDER BY count DESC
+        """
+        cursor.execute(payment_query, tuple(date_params))
+        payment_status_breakdown = cursor.fetchall()
+
+        # Parse dates for response
+        date_range_start = None
+        date_range_end = None
+        if start_date:
+            date_range_start = datetime.strptime(start_date, "%Y-%m-%d")
+        if end_date:
+            date_range_end = datetime.strptime(end_date, "%Y-%m-%d")
+
+        return SalesAnalyticsResponse(
+            total_revenue=float(totals['total_revenue']),
+            total_orders=totals['total_orders'],
+            total_products_sold=float(totals['total_products_sold']),
+            products_sales=[ProductSalesAnalytics(**product) for product in products_sales],
+            order_status_breakdown=[OrderStatusBreakdown(**status) for status in order_status_breakdown],
+            payment_status_breakdown=[PaymentStatusBreakdown(**status) for status in payment_status_breakdown],
+            date_range_start=date_range_start,
+            date_range_end=date_range_end
+        )
 
     except Error as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
