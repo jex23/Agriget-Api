@@ -943,6 +943,110 @@ async def edit_user(user_update: UserUpdate, current_user_id: int = Depends(get_
             cursor.close()
             connection.close()
 
+@app.put("/user/{user_id}", response_model=MessageResponse)
+async def edit_user_by_id(user_id: int, user_update: UserUpdate, current_user_id: int = Depends(get_current_user)):
+    """
+    Update a user by ID (Admin only)
+
+    Allows administrators to update any user account by ID.
+
+    - **user_id**: ID of the user to update
+
+    Requires admin role and valid authentication token.
+    """
+    try:
+        connection = get_db_connection()
+        if not connection:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+
+        cursor = connection.cursor(dictionary=True)
+
+        # Check if current user is admin
+        current_user_query = "SELECT role FROM users WHERE id = %s"
+        cursor.execute(current_user_query, (current_user_id,))
+        current_user = cursor.fetchone()
+
+        if not current_user or current_user['role'] != 'admin':
+            raise HTTPException(status_code=403, detail="Admin access required")
+
+        # Check if target user exists
+        check_query = "SELECT id FROM users WHERE id = %s"
+        cursor.execute(check_query, (user_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="User not found")
+
+        update_fields = []
+        values = []
+
+        update_data = user_update.model_dump(exclude_unset=True)
+
+        # Standard fields
+        allowed_fields = ['first_name', 'last_name', 'phone', 'address', 'date_of_birth', 'gender', 'email']
+
+        # Admin-only fields
+        admin_only_fields = ['username', 'role', 'status', 'archive']
+
+        for field in allowed_fields:
+            if field in update_data:
+                # Check for unique constraints
+                if field == 'email' and update_data[field]:
+                    check_email_query = "SELECT id FROM users WHERE email = %s AND id != %s"
+                    cursor.execute(check_email_query, (update_data[field], user_id))
+                    if cursor.fetchone():
+                        raise HTTPException(status_code=409, detail="Email already exists")
+
+                # Validate gender enum
+                if field == 'gender' and update_data[field] not in ['male', 'female', 'non-binary']:
+                    raise HTTPException(status_code=400, detail="Gender must be 'male', 'female', or 'non-binary'")
+
+                update_fields.append(f"{field} = %s")
+                values.append(update_data[field])
+
+        # Handle admin-only fields
+        for field in admin_only_fields:
+            if field in update_data:
+                # Additional validation for sensitive fields
+                if field == 'username' and update_data[field]:
+                    check_username_query = "SELECT id FROM users WHERE username = %s AND id != %s"
+                    cursor.execute(check_username_query, (update_data[field], user_id))
+                    if cursor.fetchone():
+                        raise HTTPException(status_code=409, detail="Username already exists")
+
+                if field == 'role' and update_data[field] not in ['admin', 'user']:
+                    raise HTTPException(status_code=400, detail="Role must be 'admin' or 'user'")
+
+                if field == 'status' and update_data[field] not in ['active', 'disable']:
+                    raise HTTPException(status_code=400, detail="Status must be 'active' or 'disable'")
+
+                if field == 'archive' and update_data[field] not in [0, 1]:
+                    raise HTTPException(status_code=400, detail="Archive must be 0 or 1")
+
+                update_fields.append(f"{field} = %s")
+                values.append(update_data[field])
+
+        if 'password' in update_data:
+            hashed_password = hash_password(update_data['password'])
+            update_fields.append("password = %s")
+            values.append(hashed_password)
+
+        if not update_fields:
+            raise HTTPException(status_code=400, detail="No valid fields to update")
+
+        values.append(user_id)
+        update_query = f"UPDATE users SET {', '.join(update_fields)} WHERE id = %s"
+
+        cursor.execute(update_query, values)
+        connection.commit()
+
+        return MessageResponse(message="User updated successfully")
+
+    except Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        if connection and connection.is_connected():
+            cursor.close()
+            connection.close()
+
 @app.delete("/user", response_model=MessageResponse)
 async def delete_user(current_user_id: int = Depends(get_current_user)):
     """
