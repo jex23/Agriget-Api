@@ -319,6 +319,20 @@ class SalesAnalyticsResponse(BaseModel):
     date_range_start: Optional[datetime] = None
     date_range_end: Optional[datetime] = None
 
+class OTPRequest(BaseModel):
+    email: EmailStr
+    purpose: str  # 'register' or 'forgot_password'
+
+class OTPVerify(BaseModel):
+    email: EmailStr
+    otp_code: str
+    purpose: str  # 'register' or 'forgot_password'
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    otp_code: str
+    new_password: str
+
 def hash_password(password: str) -> str:
     salt = bcrypt.gensalt()
     return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
@@ -426,6 +440,9 @@ def send_order_email(recipient_email: str, recipient_name: str, order_number: st
     Send order status email to customer
     """
     try:
+        # Determine if product is gravel or sand
+        quantity_label = "Volume" if any(term in product_name.lower() for term in ['gravel', 'sand']) else "Quantity"
+
         # Create message
         msg = MIMEMultipart('alternative')
         msg['From'] = f"{mail_from_name} <{mail_from_address}>"
@@ -455,7 +472,7 @@ def send_order_email(recipient_email: str, recipient_name: str, order_number: st
                   <td style="padding: 10px; border: 1px solid #ddd;">{product_name}</td>
                 </tr>
                 <tr style="background-color: #f4f4f4;">
-                  <td style="padding: 10px; border: 1px solid #ddd;"><strong>Quantity:</strong></td>
+                  <td style="padding: 10px; border: 1px solid #ddd;"><strong>{quantity_label}:</strong></td>
                   <td style="padding: 10px; border: 1px solid #ddd;">{quantity}</td>
                 </tr>
                 <tr>
@@ -504,6 +521,9 @@ def send_admin_order_notification(order_number: str, customer_name: str, custome
     Send new order notification to admin/business owner
     """
     try:
+        # Determine if product is gravel or sand
+        quantity_label = "Volume" if any(term in product_name.lower() for term in ['gravel', 'sand']) else "Quantity"
+
         # Format payment terms display name
         payment_terms_display = "Pay Upon Pickup" if payment_terms == "over_the_counter" else payment_terms.replace('_', ' ').title()
 
@@ -535,7 +555,7 @@ def send_admin_order_notification(order_number: str, customer_name: str, custome
                   <td style="padding: 10px; border: 1px solid #ddd;">{product_name}</td>
                 </tr>
                 <tr style="background-color: #f4f4f4;">
-                  <td style="padding: 10px; border: 1px solid #ddd;"><strong>Quantity:</strong></td>
+                  <td style="padding: 10px; border: 1px solid #ddd;"><strong>{quantity_label}:</strong></td>
                   <td style="padding: 10px; border: 1px solid #ddd;">{quantity}</td>
                 </tr>
                 <tr>
@@ -588,6 +608,74 @@ def send_admin_order_notification(order_number: str, customer_name: str, custome
         print(f"Failed to send admin notification email: {str(e)}")
         return False
 
+def generate_otp_code() -> str:
+    """
+    Generate a 6-digit OTP code
+    """
+    return ''.join(random.choices(string.digits, k=6))
+
+def send_otp_email(recipient_email: str, recipient_name: str, otp_code: str, purpose: str):
+    """
+    Send OTP verification email to user
+    """
+    try:
+        purpose_text = {
+            'register': 'Email Verification for Registration',
+            'forgot_password': 'Password Reset Verification',
+            'email_verify': 'Email Verification',
+            'login': 'Login Verification'
+        }
+
+        subject = purpose_text.get(purpose, 'Email Verification')
+
+        # Create message
+        msg = MIMEMultipart('alternative')
+        msg['From'] = f"{mail_from_name} <{mail_from_address}>"
+        msg['To'] = recipient_email
+        msg['Subject'] = subject
+
+        # Create HTML email body
+        html = f"""
+        <html>
+          <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+            <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 5px;">
+              <h2 style="color: #2c5f2d; border-bottom: 2px solid #2c5f2d; padding-bottom: 10px;">
+                {subject}
+              </h2>
+
+              <p>Dear {recipient_name},</p>
+
+              <p>Your verification code is:</p>
+
+              <div style="background-color: #f4f4f4; padding: 20px; text-align: center; margin: 20px 0; border-radius: 5px;">
+                <h1 style="color: #2c5f2d; font-size: 36px; letter-spacing: 10px; margin: 0;">{otp_code}</h1>
+              </div>
+
+              <p>This code will expire in 5 minutes. Please do not share this code with anyone.</p>
+
+              <p style="color: #666; font-size: 12px; margin-top: 30px; border-top: 1px solid #ddd; padding-top: 10px;">
+                This is an automated email from {mail_from_name}. Please do not reply to this email.
+              </p>
+            </div>
+          </body>
+        </html>
+        """
+
+        # Attach HTML content
+        msg.attach(MIMEText(html, 'html'))
+
+        # Connect to SMTP server and send email
+        with smtplib.SMTP_SSL(mail_host, mail_port) as server:
+            server.login(mail_username, mail_password)
+            server.send_message(msg)
+
+        print(f"OTP email sent successfully to {recipient_email}")
+        return True
+
+    except Exception as e:
+        print(f"Failed to send OTP email: {str(e)}")
+        return False
+
 def create_access_token(data: dict):
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -628,6 +716,195 @@ def get_db_connection():
         print(f"Error connecting to MySQL: {e}")
         return None
 
+@app.post("/request-otp", response_model=MessageResponse)
+async def request_otp(otp_request: OTPRequest):
+    """
+    Request OTP for email verification (registration or forgot password)
+
+    - **email**: Email address to send OTP to
+    - **purpose**: Purpose of OTP ('register' or 'forgot_password')
+    """
+    try:
+        connection = get_db_connection()
+        if not connection:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+
+        cursor = connection.cursor(dictionary=True)
+
+        # Validate purpose
+        if otp_request.purpose not in ['register', 'forgot_password']:
+            raise HTTPException(status_code=400, detail="Invalid purpose. Must be 'register' or 'forgot_password'")
+
+        # For registration, check if email already exists
+        if otp_request.purpose == 'register':
+            check_query = "SELECT id FROM users WHERE email = %s"
+            cursor.execute(check_query, (otp_request.email,))
+            if cursor.fetchone():
+                raise HTTPException(status_code=409, detail="Email already registered")
+
+        # For forgot password, check if email exists
+        if otp_request.purpose == 'forgot_password':
+            check_query = "SELECT id, first_name, last_name FROM users WHERE email = %s"
+            cursor.execute(check_query, (otp_request.email,))
+            user = cursor.fetchone()
+            if not user:
+                raise HTTPException(status_code=404, detail="Email not found")
+
+        # Generate OTP code
+        otp_code = generate_otp_code()
+
+        # Calculate expiration time (5 minutes from now)
+        expires_at = datetime.now() + timedelta(minutes=5)
+
+        # Insert OTP into database
+        insert_query = """
+        INSERT INTO otps (email, otp_code, purpose, expires_at)
+        VALUES (%s, %s, %s, %s)
+        """
+        cursor.execute(insert_query, (otp_request.email, otp_code, otp_request.purpose, expires_at))
+        connection.commit()
+
+        # Send OTP email
+        recipient_name = "User"  # Default name for registration
+        if otp_request.purpose == 'forgot_password':
+            recipient_name = f"{user['first_name']} {user['last_name']}"
+
+        send_otp_email(
+            recipient_email=otp_request.email,
+            recipient_name=recipient_name,
+            otp_code=otp_code,
+            purpose=otp_request.purpose
+        )
+
+        return MessageResponse(message="OTP sent successfully to your email")
+
+    except Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        if connection and connection.is_connected():
+            cursor.close()
+            connection.close()
+
+@app.post("/verify-otp", response_model=MessageResponse)
+async def verify_otp(otp_verify: OTPVerify):
+    """
+    Verify OTP code for email validation
+
+    - **email**: Email address
+    - **otp_code**: 6-digit OTP code
+    - **purpose**: Purpose of OTP ('register' or 'forgot_password')
+    """
+    try:
+        connection = get_db_connection()
+        if not connection:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+
+        cursor = connection.cursor(dictionary=True)
+
+        # Find valid OTP
+        query = """
+        SELECT id, expires_at, is_used
+        FROM otps
+        WHERE email = %s AND otp_code = %s AND purpose = %s
+        ORDER BY created_at DESC
+        LIMIT 1
+        """
+        cursor.execute(query, (otp_verify.email, otp_verify.otp_code, otp_verify.purpose))
+        otp_record = cursor.fetchone()
+
+        if not otp_record:
+            raise HTTPException(status_code=400, detail="Invalid OTP code")
+
+        # Check if OTP is already used
+        if otp_record['is_used']:
+            raise HTTPException(status_code=400, detail="OTP code has already been used")
+
+        # Check if OTP is expired
+        if datetime.now() > otp_record['expires_at']:
+            raise HTTPException(status_code=400, detail="OTP code has expired")
+
+        # Mark OTP as used
+        update_query = "UPDATE otps SET is_used = 1, used_at = NOW() WHERE id = %s"
+        cursor.execute(update_query, (otp_record['id'],))
+        connection.commit()
+
+        return MessageResponse(message="OTP verified successfully")
+
+    except Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        if connection and connection.is_connected():
+            cursor.close()
+            connection.close()
+
+@app.post("/reset-password", response_model=MessageResponse)
+async def reset_password(reset_request: ResetPasswordRequest):
+    """
+    Reset password using OTP verification
+
+    - **email**: Email address
+    - **otp_code**: 6-digit OTP code
+    - **new_password**: New password to set
+    """
+    try:
+        connection = get_db_connection()
+        if not connection:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+
+        cursor = connection.cursor(dictionary=True)
+
+        # Verify OTP
+        query = """
+        SELECT id, expires_at, is_used
+        FROM otps
+        WHERE email = %s AND otp_code = %s AND purpose = 'forgot_password'
+        ORDER BY created_at DESC
+        LIMIT 1
+        """
+        cursor.execute(query, (reset_request.email, reset_request.otp_code))
+        otp_record = cursor.fetchone()
+
+        if not otp_record:
+            raise HTTPException(status_code=400, detail="Invalid OTP code")
+
+        # Check if OTP is already used
+        if otp_record['is_used']:
+            raise HTTPException(status_code=400, detail="OTP code has already been used")
+
+        # Check if OTP is expired
+        if datetime.now() > otp_record['expires_at']:
+            raise HTTPException(status_code=400, detail="OTP code has expired")
+
+        # Check if user exists
+        user_query = "SELECT id FROM users WHERE email = %s"
+        cursor.execute(user_query, (reset_request.email,))
+        user = cursor.fetchone()
+
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Hash new password
+        hashed_password = hash_password(reset_request.new_password)
+
+        # Update password
+        update_password_query = "UPDATE users SET password = %s WHERE email = %s"
+        cursor.execute(update_password_query, (hashed_password, reset_request.email))
+
+        # Mark OTP as used
+        update_otp_query = "UPDATE otps SET is_used = 1, used_at = NOW() WHERE id = %s"
+        cursor.execute(update_otp_query, (otp_record['id'],))
+
+        connection.commit()
+
+        return MessageResponse(message="Password reset successfully")
+
+    except Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        if connection and connection.is_connected():
+            cursor.close()
+            connection.close()
+
 @app.post("/register", response_model=MessageResponse, status_code=201)
 async def register(user: UserRegister):
     """
@@ -653,13 +930,29 @@ async def register(user: UserRegister):
         if not connection:
             raise HTTPException(status_code=500, detail="Database connection failed")
         
-        cursor = connection.cursor()
-        
+        cursor = connection.cursor(dictionary=True)
+
         check_query = "SELECT id FROM users WHERE username = %s OR email = %s"
         cursor.execute(check_query, (user.username, user.email))
         if cursor.fetchone():
             raise HTTPException(status_code=409, detail="Username or email already exists")
-        
+
+        # Check if email has been verified via OTP
+        otp_query = """
+        SELECT id FROM otps
+        WHERE email = %s AND purpose = 'register' AND is_used = 1
+        ORDER BY created_at DESC
+        LIMIT 1
+        """
+        cursor.execute(otp_query, (user.email,))
+        verified_otp = cursor.fetchone()
+
+        if not verified_otp:
+            raise HTTPException(
+                status_code=400,
+                detail="Email not verified. Please request and verify OTP first using /request-otp endpoint"
+            )
+
         insert_query = """
         INSERT INTO users (first_name, last_name, username, phone, address, date_of_birth,
                           gender, email, role, password, status, archive)
